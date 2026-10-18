@@ -91,7 +91,7 @@ export async function buildApp() {
       : undefined;
     if (typeof statusCode === 'number' && statusCode < 500) return reply.send(err);
     app.log.error(err);
-    return reply.code(500).send({ error: 'INTERNAL' });
+    return reply.code(500).send({ error: 'INTERNAL', debug: String((err as any)?.code ?? (err as any)?.message) });
   });
 
   app.get('/health', async () => ({ ok: true, redis: (await redis.ping()) === 'PONG' }));
