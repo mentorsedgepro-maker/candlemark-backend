@@ -20,12 +20,13 @@ const cookieOpts = {
   secure: prod, maxAge: RT_DAYS * 86400,
 };
 
-async function issue(app: FastifyInstance, reply: FastifyReply, u: { id: string; role: string }, ua?: string) {
+async function issue(app: FastifyInstance, reply: FastifyReply, u: { id: string; role: string }, ua?: string, persist = true) {
   const raw = randomBytes(48).toString('base64url');
   await prisma.refreshToken.create({
-    data: { userId: u.id, tokenHash: sha(raw), userAgent: ua, expiresAt: new Date(Date.now() + RT_DAYS * 864e5) },
+    data: { userId: u.id, tokenHash: sha(raw), userAgent: ua, expiresAt: new Date(Date.now() + (persist ? RT_DAYS : 1) * 864e5) },
   });
-  reply.setCookie('rt', raw, cookieOpts);
+  const { maxAge, ...sessionOpts } = cookieOpts;
+  reply.setCookie('rt', raw, persist ? cookieOpts : sessionOpts);
   return app.jwt.sign({ sub: u.id, role: u.role });
 }
 
@@ -39,6 +40,7 @@ const loginBody = z.object({
   email: z.string().trim().toLowerCase().email(),
   password: z.string().min(1).max(128),
   totp: z.string().regex(/^\d{6}$/).optional(),
+  remember: z.boolean().optional(),
 });
 const codeBody = z.object({ code: z.string().regex(/^\d{6}$/) });
 
@@ -86,7 +88,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       }
     }
     await audit(user.id, 'auth.login', req.ip);
-    const accessToken = await issue(app, reply, user, req.headers['user-agent']);
+    const accessToken = await issue(app, reply, user, req.headers['user-agent'], b.remember ?? true);
     return { accessToken, user: publicUser(user) };
   });
 
@@ -141,7 +143,8 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(401).send({ error: 'INVALID_REFRESH' });
     }
     await prisma.refreshToken.update({ where: { id: t.id }, data: { revokedAt: new Date() } });
-    const accessToken = await issue(app, reply, t.user, req.headers['user-agent']);
+    const persist = t.expiresAt.getTime() - t.createdAt.getTime() > 2 * 864e5;
+    const accessToken = await issue(app, reply, t.user, req.headers['user-agent'], persist);
     return { accessToken, user: publicUser(t.user) };
   });
 
