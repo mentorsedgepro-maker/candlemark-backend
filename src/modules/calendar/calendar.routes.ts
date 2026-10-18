@@ -1,7 +1,10 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { redis } from '../../lib/redis.js';
 
-const URL_ = 'https://nfs.faireconomy.media/ff_calendar_thisweek.json';
+const URLS = [
+  'https://nfs.faireconomy.media/ff_calendar_thisweek.json',
+  'https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json',
+];
 
 async function load() {
   const hit = await redis.get('cal:data');
@@ -9,14 +12,14 @@ async function load() {
   const stale = await redis.get('cal:stale');
   if (await redis.get('cal:fail')) return stale ? JSON.parse(stale) : [];
   try {
-    const response = await fetch(URL_, {
-      signal: AbortSignal.timeout(8000),
-      headers: { 'user-agent': 'Mozilla/5.0', accept: 'application/json' },
-    });
-    if (!response.ok) throw new Error(String(response.status));
-    const raw = await response.json();
+    let raw: unknown;
+    for (const u of URLS) {
+      const r = await fetch(u, { signal: AbortSignal.timeout(8000), headers: { 'user-agent': 'Mozilla/5.0', accept: 'application/json' } }).catch(() => null);
+      if (r?.ok) { raw = await r.json().catch(() => null); if (Array.isArray(raw) && raw.length) break; }
+      else console.error('calendar status', u, r?.status);
+    }
     if (!Array.isArray(raw) || !raw.length) throw new Error('BAD_PAYLOAD');
-    const items = raw.map((event) => ({
+    const items = raw.map((event: any) => ({
       title: String(event.title ?? ''),
       ccy: String(event.country ?? ''),
       date: String(event.date ?? ''),
