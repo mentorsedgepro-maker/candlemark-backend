@@ -36,7 +36,7 @@ const NF = { error: 'NOT_FOUND' };
 const addr = {
   wire: z.object({ holder: s(), bank: s(), accountNumber: s(), routing: s(), address: s() }).strict(),
   sepa: z.object({ bank: s(), iban: s(), bic: s(), address: s() }).strict(),
-  crypto: z.object({ btc: s(100), eth: s(100), usdtTrc20: s(100) }).strict(),
+  crypto: z.object({ btc: s(100), eth: s(100), usdtTrc20: s(100), sol: s(100), usdc: s(100) }).strict(),
 };
 
 const handle = z.string().regex(/^[a-z0-9_]{3,30}$/);
