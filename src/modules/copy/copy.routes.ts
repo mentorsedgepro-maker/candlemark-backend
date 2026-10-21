@@ -1,15 +1,14 @@
 import type { FastifyPluginAsync } from 'fastify';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
 import { audit } from '../../lib/audit.js';
 import { money } from '../wallet/money.js';
-import { balanceOf } from '../wallet/ledger.js';
-import { chargeFee } from './copy.js';
+import { balanceOf, postEntry } from '../wallet/ledger.js';
 import { tradingAccount } from '../tier/tier.js';
 
 const startBody = z.object({ allocation: money });
 const id = z.object({ id: z.string().min(1).max(40) });
-const period = () => new Date().toISOString().slice(0, 7);
 
 const mentorView = (m: any) => ({
   id: m.id,
@@ -72,12 +71,25 @@ export const copyRoutes: FastifyPluginAsync = async (app) => {
     if ((await balanceOf(account.id)) < allocation + mentor.feeMinor)
       return reply.code(400).send({ error: 'INSUFFICIENT_FUNDS' });
 
-    const copy = await prisma.copyRelation.upsert({
+    const prev = await prisma.copyRelation.findUnique({
       where: { accountId_mentorId: { accountId: account.id, mentorId } },
-      update: { allocationMinor: allocation, status: 'ACTIVE' },
-      create: { accountId: account.id, mentorId, allocationMinor: allocation },
     });
-    await chargeFee(account.id, mentorId, mentor.feeMinor, period());
+    const copy = await prisma.$transaction(async (tx) => {
+      if (!prev || prev.status === 'STOPPED')
+        await postEntry(tx, {
+          accountId: account.id,
+          amount: -mentor.feeMinor,
+          type: 'COPY_FEE',
+          key: `copystart:${account.id}:${mentorId}:${randomUUID()}`,
+          refType: 'Mentor',
+          refId: mentorId,
+        });
+      return tx.copyRelation.upsert({
+        where: { accountId_mentorId: { accountId: account.id, mentorId } },
+        update: { allocationMinor: allocation, status: 'ACTIVE' },
+        create: { accountId: account.id, mentorId, allocationMinor: allocation },
+      });
+    });
     await audit(req.user.sub, 'copy.start', req.ip, { mentorId, allocation: allocation.toString() });
     return reply.code(201).send({ id: copy.id, status: copy.status });
   });
