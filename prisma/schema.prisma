@@ -63,24 +63,32 @@ enum CopyStatus {
   STOPPED
 }
 
+enum TradeResult {
+  WIN
+  LOSS
+}
+
 model User {
-  id            String   @id @default(cuid())
-  email         String   @unique
-  emailVerified Boolean  @default(false)
-  passwordHash  String
-  name          String
-  country       String?
-  avatarUrl     String?
-  role          Role     @default(USER)
-  status        UserStatus @default(ACTIVE)
-  totpSecret    String?
-  totpEnabled   Boolean  @default(false)
-  createdAt     DateTime @default(now())
-  accounts      Account[]
-  tokens        RefreshToken[]
-  kyc           KycProfile?
-  mentor        Mentor?
-  notifications Notification[]
+  id              String            @id @default(cuid())
+  email           String            @unique
+  emailVerified   Boolean           @default(false)
+  passwordHash    String
+  name            String
+  country         String?
+  avatarUrl       String?
+  role            Role              @default(USER)
+  status           UserStatus        @default(ACTIVE)
+  totpSecret      String?
+  totpEnabled     Boolean           @default(false)
+  createdAt       DateTime          @default(now())
+  accounts        Account[]
+  tokens          RefreshToken[]
+  kyc             KycProfile?
+  mentor          Mentor?
+  notifications   Notification[]
+  allocations     MirrorAllocation[]
+  tradeExecutions TradeExecution[]  @relation("MenteeTrades")
+  mentorTrades    Trade[]           @relation("MentorTrades")
 }
 
 model RefreshToken {
@@ -238,6 +246,40 @@ model CopyRelation {
   account         Account    @relation(fields: [accountId], references: [id])
   mentor          Mentor     @relation(fields: [mentorId], references: [id])
   @@unique([accountId, mentorId])
+}
+
+model Trade {
+  id         String           @id @default(cuid())
+  mentorId   String
+  result     TradeResult
+  profitRate Decimal          @db.Decimal(10, 6)
+  createdAt  DateTime         @default(now())
+  mentor     User             @relation("MentorTrades", fields: [mentorId], references: [id])
+  executions TradeExecution[]
+  @@index([mentorId, createdAt])
+}
+
+model TradeExecution {
+  id              String   @id @default(cuid())
+  tradeId         String
+  menteeId        String
+  allocatedAmount BigInt   // Currency minor units (for example, cents).
+  pnlAmount       BigInt   // Currency minor units (for example, cents).
+  balanceAfter    BigInt   // Currency minor units (for example, cents).
+  createdAt       DateTime @default(now())
+  trade           Trade    @relation(fields: [tradeId], references: [id])
+  mentee          User     @relation("MenteeTrades", fields: [menteeId], references: [id])
+  @@index([tradeId])
+  @@index([menteeId, createdAt])
+}
+
+model MirrorAllocation {
+  id       String   @id @default(cuid())
+  mentorId String
+  menteeId String
+  amount   BigInt   // Currency minor units (for example, cents).
+  mentee   User     @relation(fields: [menteeId], references: [id], onDelete: Cascade)
+  @@unique([mentorId, menteeId])
 }
 
 model Notification {
