@@ -265,7 +265,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     if (!ok) return reply.code(409).send({ error: 'NOT_PENDING' });
     await audit(req.user.sub, `admin.withdrawal_${body.decision.toLowerCase()}`, req.ip, { id, note: body.note });
     const withdrawal = await prisma.withdrawal.findUnique({ where: { id }, include: { account: { select: { userId: true } } } });
-    if (withdrawal) void notify(withdrawal.account.userId, `Withdrawal ${body.decision.toLowerCase()}`, `Your withdrawal of $${usd(withdrawal.amountMinor)} was ${body.decision.toLowerCase()}.${body.decision === 'REJECTED' ? ' The funds were returned to your balance.' : ''}`, true).catch(() => {});
+    if (withdrawal) void notify(withdrawal.account.userId, `Withdrawal ${body.decision.toLowerCase()}`, `Your withdrawal of $${usd(withdrawal.amountMinor)} was ${body.decision.toLowerCase()}.${body.decision === 'REJECTED' ? ' The funds were returned to your balance.' : ''}${body.note ? ' Reason: ' + body.note : ''}`, true, body.note ? [['Reason', body.note]] : undefined).catch(() => {});
     return { status: body.decision };
   });
 
