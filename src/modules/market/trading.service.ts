@@ -21,9 +21,15 @@ function nextTradeOutcome() {
 export async function executeScheduledMentorTrade(mentorId: string) {
   const mentor = await prisma.mentor.findUnique({
     where: { id: mentorId },
-    select: { id: true, userId: true },
+    select: {
+      id: true,
+      userId: true,
+      displayName: true,
+      user: { select: { name: true } },
+    },
   });
   if (!mentor) throw new Error('MENTOR_NOT_FOUND');
+  const mentorName = mentor.displayName ?? mentor.user.name;
 
   const notifications = await prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${mentor.userId} FOR UPDATE`;
@@ -94,8 +100,9 @@ export async function executeScheduledMentorTrade(mentorId: string) {
       messages.push({
         userId: allocation.account.userId,
         title: `High-margin trade update: ${status}`,
-        body: `Your mirrored trade closed with ${status.toLowerCase()} of ${formattedPnlStr} (${percentageStr}).`,
+        body: `Your mirrored trade from ${mentorName} closed with ${status.toLowerCase()} of ${formattedPnlStr} (${percentageStr}).`,
         rows: [
+          ['Mentor', mentorName],
           ['Result', status],
           ['Profit / loss', formattedPnlStr],
           ['Return rate', percentageStr],
