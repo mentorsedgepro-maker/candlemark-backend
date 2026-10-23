@@ -4,18 +4,18 @@ import { notify, usd } from '../../lib/notify.js';
 import { balanceOf, postEntry } from '../wallet/ledger.js';
 
 const D = Prisma.Decimal;
-const WIN_RATE = new D('0.04');
-const LOSS_RATE = new D('-0.02');
 const DAILY_TRADE_LIMIT = 3;
 
-function nextTradeOutcome(trades: { result: TradeResult }[]) {
-  if (trades.length >= DAILY_TRADE_LIMIT) return null;
+/**
+ * Generates a randomized outcome with +20% to +45% wins and capped -5% to -15% losses.
+ */
+function nextTradeOutcome() {
+  const result = Math.random() < 0.5 ? TradeResult.WIN : TradeResult.LOSS;
+  const profitRate = result === TradeResult.WIN
+    ? new D((Math.random() * (0.45 - 0.20) + 0.20).toFixed(4))
+    : new D((Math.random() * (0.15 - 0.05) + 0.05).toFixed(4)).negated();
 
-  const result = trades.length < 2 ? TradeResult.WIN : TradeResult.LOSS;
-  return {
-    result,
-    profitRate: result === TradeResult.WIN ? WIN_RATE : LOSS_RATE,
-  };
+  return { result, profitRate };
 }
 
 export async function executeScheduledMentorTrade(mentorId: string) {
@@ -26,6 +26,8 @@ export async function executeScheduledMentorTrade(mentorId: string) {
   if (!mentor) throw new Error('MENTOR_NOT_FOUND');
 
   const notifications = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${mentor.userId} FOR UPDATE`;
+
     const allocations = await tx.copyRelation.findMany({
       where: { mentorId: mentor.id, status: 'ACTIVE' },
       include: { account: { select: { userId: true } } },
@@ -34,12 +36,17 @@ export async function executeScheduledMentorTrade(mentorId: string) {
 
     const startOfDay = new Date();
     startOfDay.setUTCHours(0, 0, 0, 0);
-    const tradesToday = await tx.trade.findMany({
+
+    const tradesTodayCount = await tx.trade.count({
       where: { mentorId: mentor.userId, createdAt: { gte: startOfDay } },
-      select: { result: true },
     });
-    const outcome = nextTradeOutcome(tradesToday);
-    if (!outcome) return [];
+
+    if (tradesTodayCount >= DAILY_TRADE_LIMIT) {
+      console.info(`Daily trade limit of ${DAILY_TRADE_LIMIT} reached for mentor ${mentorId}.`);
+      return [];
+    }
+
+    const outcome = nextTradeOutcome();
 
     const trade = await tx.trade.create({
       data: {
@@ -67,6 +74,7 @@ export async function executeScheduledMentorTrade(mentorId: string) {
         refType: 'Trade',
         refId: trade.id,
       });
+
       const balanceAfter = await balanceOf(accountId, tx);
       await tx.tradeExecution.create({
         data: {
@@ -78,14 +86,19 @@ export async function executeScheduledMentorTrade(mentorId: string) {
         },
       });
 
-      const status = outcome.result === TradeResult.WIN ? 'PROFIT' : 'LOSS';
+      const isWin = outcome.result === TradeResult.WIN;
+      const status = isWin ? 'PROFIT' : 'LOSS';
+      const formattedPnlStr = `${pnlAmount >= 0n ? '+' : '-'}$${usd(pnlAmount < 0n ? -pnlAmount : pnlAmount)}`;
+      const percentageStr = `${outcome.profitRate.mul(100).toFixed(2)}%`;
+
       messages.push({
         userId: allocation.account.userId,
-        title: `Trade update: ${status}`,
-        body: `Your mirrored trade closed with ${status.toLowerCase()} of $${usd(pnlAmount)}.`,
+        title: `High-margin trade update: ${status}`,
+        body: `Your mirrored trade closed with ${status.toLowerCase()} of ${formattedPnlStr} (${percentageStr}).`,
         rows: [
           ['Result', status],
-          ['Profit / loss', `$${usd(pnlAmount)}`],
+          ['Profit / loss', formattedPnlStr],
+          ['Return rate', percentageStr],
           ['Allocated', `$${usd(allocation.allocationMinor)}`],
           ['Balance', `$${usd(balanceAfter)}`],
         ],
@@ -97,5 +110,9 @@ export async function executeScheduledMentorTrade(mentorId: string) {
   for (const message of notifications) {
     void notify(message.userId, message.title, message.body, true, message.rows)
       .catch((error) => console.error('Failed to send mentor trade notification', error));
+  }
+
+  if (notifications.length) {
+    console.info(`Executed randomized trade for mentor ${mentorId}.`);
   }
 }
