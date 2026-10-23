@@ -4,7 +4,7 @@ import { notify, usd } from '../../lib/notify.js';
 import { balanceOf, postEntry } from '../wallet/ledger.js';
 
 const D = Prisma.Decimal;
-const DAILY_TRADE_LIMIT = 3;
+const DAILY_TRADE_LIMIT = 1;
 
 /**
  * Generates a randomized outcome with +20% to +45% wins and capped -5% to -15% losses.
