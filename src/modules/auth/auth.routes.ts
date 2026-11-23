@@ -8,6 +8,8 @@ import { encrypt, decrypt } from '../../lib/crypto.js';
 import { audit } from '../../lib/audit.js';
 import { env } from '../../config/env.js';
 import { sendOtp, checkOtp } from './otp.js';
+import { redis } from '../../lib/redis.js';
+import { verifyTurnstile, isDisposable, underGlobalLimit } from '../../lib/antiabuse.js';
 import { tierOf } from '../tier/tier.js';
 
 authenticator.options = { window: 1 }; // tolerate ±30s clock drift
@@ -35,6 +37,8 @@ const registerBody = z.object({
   email: z.string().trim().toLowerCase().email().max(254),
   password: z.string().min(8).max(128),
   country: z.string().trim().max(60).optional(),
+  captcha: z.string().max(4096).optional(), // Cloudflare Turnstile token
+  website: z.string().max(200).optional(),  // honeypot: hidden field, real users leave it empty
 });
 const loginBody = z.object({
   email: z.string().trim().toLowerCase().email(),
@@ -48,24 +52,30 @@ const publicUser = (u: { id: string; email: string; name: string; country: strin
   ({ id: u.id, email: u.email, name: u.name, country: u.country, role: u.role, totpEnabled: u.totpEnabled, avatarUrl: u.avatarUrl });
 
 export const authRoutes: FastifyPluginAsync = async (app) => {
+  // Signups stay in Redis until the email code is confirmed; no User row exists before that.
+  const PENDING_TTL = 3600;
+  const pendingKey = (email: string) => `reg:pending:${email}`;
+  const pendingOtpId = (email: string) => `p:${email}`;
+  const registered = (email: string) => ({ needsVerification: true, email });
+
   app.post('/register', { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } }, async (req, reply) => {
     const b = registerBody.parse(req.body);
-    if (await prisma.user.findUnique({ where: { email: b.email } }))
-      return reply.code(409).send({ error: 'EMAIL_TAKEN' });
+    if (b.website) return reply.code(201).send(registered(b.email)); // honeypot tripped: pretend success
+    if (!(await verifyTurnstile(b.captcha, req.ip))) return reply.code(400).send({ error: 'CAPTCHA_FAILED' });
+    if (isDisposable(b.email)) return reply.code(400).send({ error: 'EMAIL_DOMAIN_NOT_ALLOWED' });
+    if (!(await underGlobalLimit('register:hour', 300, 3600))) return reply.code(429).send({ error: 'TRY_AGAIN_LATER' });
 
     const passwordHash = await argon2.hash(b.password);
-    const user = await prisma.$transaction(async (tx) => {
-      const u = await tx.user.create({
-        data: { email: b.email, name: b.name, country: b.country, passwordHash, accounts: { create: { type: 'LIVE' } } },
-        include: { accounts: true },
-      });
-      await tx.kycProfile.create({ data: { userId: u.id } });
-      return u;
-    });
+    const existing = await prisma.user.findUnique({ where: { email: b.email } });
+    if (existing) {
+      // Same response as a new signup so the form can't be used to discover registered emails.
+      if (existing.status === 'ACTIVE' && !existing.emailVerified) await sendOtp(existing.id, existing.email, 'verify');
+      return reply.code(201).send(registered(b.email));
+    }
 
-    await audit(user.id, 'auth.register', req.ip);
-    await sendOtp(user.id, user.email, 'verify');
-    return reply.code(201).send({ needsVerification: true, email: user.email });
+    await redis.set(pendingKey(b.email), JSON.stringify({ name: b.name, country: b.country, passwordHash, ip: req.ip }), 'EX', PENDING_TTL);
+    await sendOtp(pendingOtpId(b.email), b.email, 'verify');
+    return reply.code(201).send(registered(b.email));
   });
 
   app.post('/login', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
@@ -97,6 +107,32 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
   app.post('/verify-email', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
     const body = otpBody.parse(req.body);
+
+    const pending = await redis.get(pendingKey(body.email));
+    if (pending) {
+      if (!(await checkOtp(pendingOtpId(body.email), 'verify', body.code))) return reply.code(400).send({ error: 'INVALID_CODE' });
+      const p = JSON.parse(pending) as { name: string; country?: string; passwordHash: string; ip?: string };
+      let user;
+      try {
+        user = await prisma.$transaction(async (tx) => {
+          const u = await tx.user.create({
+            data: { email: body.email, name: p.name, country: p.country, passwordHash: p.passwordHash, emailVerified: true, accounts: { create: { type: 'LIVE' } } },
+          });
+          await tx.kycProfile.create({ data: { userId: u.id } });
+          return u;
+        });
+      } catch (e) {
+        if ((e as { code?: string }).code === 'P2002') return reply.code(400).send({ error: 'INVALID_CODE' }); // already created
+        throw e;
+      }
+      await redis.del(pendingKey(body.email));
+      await audit(user.id, 'auth.register', p.ip ?? req.ip);
+      await audit(user.id, 'auth.email_verified', req.ip);
+      const accessToken = await issue(app, reply, user, req.headers['user-agent']);
+      return { accessToken, user: publicUser(user) };
+    }
+
+    // Accounts created before this change that never verified
     const user = await prisma.user.findUnique({ where: { email: body.email } });
     if (!user || user.status !== 'ACTIVE' || !(await checkOtp(user.id, 'verify', body.code)))
       return reply.code(400).send({ error: 'INVALID_CODE' });
@@ -108,6 +144,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
   app.post('/resend-otp', { config: { rateLimit: { max: 3, timeWindow: '1 minute' } } }, async (req) => {
     const { email } = emailBody.parse(req.body);
+    if (await redis.exists(pendingKey(email))) { await sendOtp(pendingOtpId(email), email, 'verify'); return { ok: true }; }
     const user = await prisma.user.findUnique({ where: { email } });
     if (user && user.status === 'ACTIVE' && !user.emailVerified) await sendOtp(user.id, user.email, 'verify');
     return { ok: true };
