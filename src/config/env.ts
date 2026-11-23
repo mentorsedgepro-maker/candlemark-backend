@@ -17,6 +17,9 @@ const schema = z.object({
   MAIL_FROM_EMAIL: z.string().email().default('no-reply@example.com'),
   MAIL_FROM_NAME: z.string().default('MentorsEdgePro'),
   SUPPORT_EMAIL: z.string().email().optional(),
+  TURNSTILE_SECRET: z.string().optional(),
+}).refine((e) => e.NODE_ENV !== 'production' || !!e.TURNSTILE_SECRET, {
+  message: 'TURNSTILE_SECRET is required in production', path: ['TURNSTILE_SECRET'],
 });
 
 export const env = schema.parse(process.env);

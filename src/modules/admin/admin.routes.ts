@@ -88,12 +88,14 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.get('/users', async (req) => {
-    const { q, status, limit, cursor } = page.extend({
+    const { q, status, verified, limit, cursor } = page.extend({
       q: z.string().trim().max(100).optional(), status: z.enum(['ACTIVE', 'SUSPENDED', 'DEACTIVATED']).optional(),
+      verified: z.enum(['true', 'false', 'all']).default('true'), // unverified signups hidden by default
     }).parse(req.query);
     const rows = await prisma.user.findMany({
       where: {
         ...(status && { status }),
+        ...(verified !== 'all' && { emailVerified: verified === 'true' }),
         ...(q && { OR: [{ email: { contains: q, mode: 'insensitive' as const } }, { name: { contains: q, mode: 'insensitive' as const } }] }),
       },
       include: { kyc: { select: { status: true } }, accounts: { where: { type: 'LIVE' }, select: { id: true } } },
